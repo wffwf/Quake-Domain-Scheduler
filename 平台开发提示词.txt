@@ -1,0 +1,278 @@
+在kongtan目录下帮我完成以下开发
+# 项目：空探平台（Quake 资产探测与日常信息收集系统）
+
+## 0. 参考文件（请先阅读）
+- `quake_probe.py`：360 Quake API 查询、数据获取与整理的样例代码，请据此理解请求构造、分页、字段结构。
+- `通用Web页面框架.md`：Web 页面结构、样式与交互规范，前端页面须遵循该框架。
+若附件缺失，请先向我索要，不要臆造 API 字段。
+
+## 1. 项目目标
+用 **Go 语言** 实现一个跨平台（Windows / Linux / macOS）可执行程序。启动后用户访问 `http://127.0.0.1:8360` 使用系统。系统用于帮助用户在每个自然月内**充分利用 360Quake 账号点数**，完成日常信息搜集：定期对指定域名执行 Quake 空间资产探测，采集 URL 与子域名，结构化存储，便于检索、下载与分析。
+
+## 2. 技术栈
+- 语言：Go 1.21+
+- Web 框架：`gin`（如与《通用Web页面框架.md》冲突，以框架文档为准）
+- SQLite 驱动：`modernc.org/sqlite`（纯 Go，无需 CGO，保证跨平台）
+- 配置：YAML（`config.yaml`）
+- 定时：`robfig/cron/v3` + 自实现月末尾时间窗口判断
+- CSV：`encoding/csv`，UTF-8 with BOM（兼容 Excel 中文）
+- 日志：`log/slog`
+- 前端：静态 HTML/JS/CSS 内嵌（`embed`），遵循《通用Web页面框架.md》
+
+## 3. 目录结构（建议）
+```
+kongtan/
+├── main.go
+├── config.yaml
+├── internal/
+│   ├── config/        # 配置加载
+│   ├── db/            # SQLite 初始化与迁移
+│   ├── model/         # 数据模型
+│   ├── api/           # Web 路由与 Handler
+│   ├── quake/         # Quake API 客户端（多 API 顺序切换）
+│   ├── probe/         # 探测任务执行引擎
+│   ├── scheduler/     # 月末尾窗口定时调度
+│   ├── processor/     # URL 解析、host 提取、ICP/地理位置抽取
+│   ├── blacklist/     # 黑名单过滤
+│   └── exporter/      # CSV 导出
+├── web/               # 前端静态资源
+├── data/              # SQLite 数据库文件
+└── output/            # CSV 导出目录
+```
+
+## 4. 配置文件 `config.yaml`（必须支持以下字段，并可按需扩展）
+```yaml
+server:
+  listen_ip: "127.0.0.1"       # 监听 IP
+  port: 8360                    # 监听端口
+  read_timeout_sec: 30
+  write_timeout_sec: 60
+
+quake:
+  base_url: "https://quake.360.net/api/v3/search/quake_service"
+  page_size: 1000               # 单次请求条数，≤1000
+  start_page: 1                 # 起始页码
+  max_pages: 50                 # 单域名最大翻页数（防止失控）
+  request_interval_ms: 300      # 请求间隔，避免限流
+  timeout_sec: 60               # 单次 HTTP 超时
+  max_retries: 2                # 单请求重试次数
+  point_budget_per_task: 50000   # 单任务一次性消费点数上限（达到即停止）
+  use_scroll: false             # 固定为 false，禁止滚动查询；代码中不实现 scroll 分支
+  apis:                         # 多 API，顺序使用；前一个不可用/额度耗尽则切下一个
+    - name: "primary"
+      token: "xxxxxxxx"
+      enabled: true
+    - name: "backup"
+      token: "yyyyyyyy"
+      enabled: true
+
+schedule:
+  monthly_window_hours: 6       # 每月最后 N 小时自动执行
+  timezone: "Asia/Shanghai"     # 时区
+  enabled: true
+
+storage:
+  db_path: "./data/kongtan.db"
+  output_dir: "./output"
+  input_dir: "./data/input"     # API 与域名的 txt 输入目录
+
+blacklist:
+  # 匹配 URL / host / domain 中包含任一关键词即过滤
+  keywords:
+    - "ottcn.com"
+    - "example-blacklist.com"
+  # 可选：按正则过滤
+  regexes: []
+```
+
+### 4.1 启动时自动释放配置模板
+- 程序启动时检查**当前工作目录**下的 `config.yaml`：
+  - 若文件不存在：将内置的默认配置模板（通过 `go:embed` 嵌入，内容与第 4 节 YAML 示例一致）写出到 `./config.yaml`，并在标准输出与日志中提示：`未检测到 config.yaml，已生成默认配置模板：<绝对路径>，请按需修改后重启。`
+  - 若文件已存在：不覆盖，仅提示 `已加载配置文件：<绝对路径>`。
+  - 若写出失败（如目录只读）：打印明确错误并退出，退出码非 0，不得静默继续。
+- 模板内容需包含所有配置项与注释说明（含 `apis` 示例占位、黑名单示例 `ottcn.com`、`use_scroll: false` 等），用户可直接编辑使用。
+- 保证跨平台：路径使用 `filepath`，Windows / Linux / macOS 均正确。
+- 该逻辑与「同步 txt 落地」互不冲突：配置模板释放只发生在启动阶段、仅针对 `config.yaml`。
+
+## 5. SQLite 表结构（迁移脚本由程序自动执行）
+- `groups(id, name UNIQUE, description, created_at)`
+- `api_keys(id, name, token, sort_order, enabled, created_at)`
+- `domains(id, domain, group_id, enabled, created_at)`
+- `blacklist(id, type, value, created_at)`  —— type ∈ {keyword, regex}
+- `tasks(id, group_id, group_name, trigger_type, status, started_at, finished_at, page_size, total_records, consumed_points, error_msg)`
+  - trigger_type ∈ {scheduled, manual}
+  - status ∈ {pending, running, success, failed, partial}
+- `urls(id, task_id, task_name, group_name, url, host, ip, port, title, domain,
+       icp_licence, icp_unit, icp_nature, icp_expired,
+       province_cn, city_cn, country_cn, isp, asname, scene_cn, gps_lat, gps_lng,
+       raw_json, created_at)`
+- `subdomains(id, task_id, task_name, group_name, subdomain, domain, host,
+              icp_licence, icp_unit, icp_nature, icp_expired,
+              province_cn, city_cn, country_cn, isp, asname, scene_cn, gps_lat, gps_lng,
+              created_at)`
+
+说明：
+- `task_name` 字段值 = 分组名称（`groups.name`）+ 时间戳，形如 `移动集团_20261130_180000`，用于在 URL 与 subdomain 记录中体现任务分组归属。
+- `group_name` 冗余存储分组名称，便于导出时直接使用。
+
+## 6. 功能需求
+
+### 6.1 API 信息管理
+- Web 页面录入 / 编辑 / 删除 / 启用禁用 / 排序 360Quake API Token。
+- **同步**以 txt 格式落地到 `input_dir/apis.txt`（每行 `name,token,enabled,sort_order`）；启动时若 txt 存在且数据库为空，自动导入。
+- 支持在页面点击"测试"按钮，验证 Token 有效性。
+- 脱敏展示token信息
+
+### 6.2 域名管理
+- 支持单条录入、批量粘贴、txt 文件导入。
+- 每条域名必须指定所属**分组**（可现场新建分组）。
+- **同步**以 txt 格式落地到 `input_dir/domains/<group_name>.txt`（每行一个域名）；启动时若 txt 存在且该分组数据库为空，自动导入。
+- 域名允许重复校验，同分组内去重。
+- Web 页面维护分组、域名，支持录入 / 编辑 / 删除 ，按照录入的顺序执行任务，不支持排序
+
+### 6.3 黑名单管理
+- Web 页面维护黑名单关键词与正则。
+- 过滤时机：**采集入库前**与**CSV 导出前**双重过滤。
+- 匹配对象：完整 URL、host、domain 任一包含关键词即丢弃该条记录（并记入日志统计）。
+
+### 6.4 任务分组
+- 分组具有 `name` 与 `description`。
+- 每次探测任务归属于一个分组；任务产生的 URL / subdomain 记录必须带上 `task_name` 与 `group_name`。
+- 支持对单个分组"立即执行"，也支持对所有启用分组按计划执行。
+
+### 6.5 Quake 探测执行引擎（分页方式：仅 page 翻页，禁用滚动查询）
+- **明确禁止使用滚动查询（scroll / scroll_id）**：
+  - 不调用 Quake 的滚动查询接口；
+  - 不在请求中携带 `scroll_id`、`scroll`、`cursor` 等滚动相关参数；
+  - 代码中**不实现** scroll 分支，配置 `quake.use_scroll` 固定为 `false` 且不生效；
+  - 仅通过 `page` + `page_size` 逐页拉取。
+- 对每个域名执行 Quake 空间资产查询 API：
+  - `page_size = 1000`（来自配置，≤1000）
+  - `page` 从 `start_page`（默认 1）开始逐页递增，每次请求后 `sleep(request_interval_ms)`
+  - 逐页拉取，直至：返回条数 < `page_size`、返回空、或达到 `max_pages`、或点数预算耗尽
+  - 失败重试 `max_retries` 次；仍失败则**切换下一个 API Token**（按 `sort_order`）
+- **点数控制**：累计消耗达到 `point_budget_per_task` 立即停止该任务，标记 `partial`。
+- 所有 API 均不可用或额度耗尽：任务标记 `failed`，记录 `error_msg`。
+- 日志中需记录每个域名的翻页过程（page、返回条数、累计点数），便于审计。
+
+### 6.6 数据处理规则（关键）
+对 Quake 返回的每条记录：
+
+1. **URL 解析**
+   - 先尝试 `net/url.Parse`；若 `Scheme` 为空，补 `http://` 再解析。
+   - 从解析结果取 `Host`，去掉端口后作为候选 host。
+   - 若 host 经 `net.ParseIP` 判定为 IP：
+     - **绝不**把 IP 写入 `subdomain` 字段；该条 subdomain 记录直接跳过（URL 记录中的 `ip` 字段仍可保留）。
+2. **兜底策略**
+   - 若 URL 解析不出 hostname/domain，**只用 API 返回的 `hostname` / `domain` 字段**，**绝不再回退到 IP**。
+3. **域名抽取**
+   - 裸主机名如 `wap.js.10086.cn`（无 `://`）也必须能正确解析为 subdomain = `wap.js.10086.cn`，domain 取注册域 `10086.cn`。
+4. **ICP 信息抽取**（无则全部留空，不报错）
+   - `icp_licence` ← `icp.licence`
+   - `icp_unit` ← `icp.main_licence.unit`
+   - `icp_nature` ← `icp.main_licence.nature`
+   - `icp_expired` ← `icp.is_expired`
+5. **地理位置抽取**（无则留空）
+   - `province_cn`, `city_cn`, `country_cn`, `isp`, `asname`, `scene_cn`
+   - `gps_lat` ← `location.gps[0]`, `gps_lng` ← `location.gps[1]`（缺失则空）
+6. **去重（分两层，互不冲突）**
+   - **入库层去重（保留原有规则）**：
+     - URL 表按 `url` 去重（同任务内）。
+     - Subdomain 表按 `(subdomain, domain)` 去重（同任务内）。
+   - **展示层去重（Web「数据查看」页面查询时生效）**：
+     - URL 列表：以 `url` 为索引跨任务去重，仅保留 `created_at` 最新的一条记录（同 URL 多次任务命中只显示最新那条）。
+     - Subdomain 列表：以 `subdomain` 为索引跨任务去重，仅保留 `created_at` 最新的一条记录。
+     - 去重通过 SQL 实现，推荐 `ROW_NUMBER() OVER (PARTITION BY url ORDER BY created_at DESC, id DESC) = 1`（SQLite 3.25+ 支持窗口函数，`modernc.org/sqlite` 已满足）；分页、检索、总数统计均基于去重后的结果集。
+     - **CSV 导出不受展示层去重影响**：导出仍按任务维度输出该任务全部入库记录（含入库层去重后的结果），保证审计可追溯。
+7. **原始数据留档**：每条记录原始 JSON 存入 `raw_json`，便于追溯。
+
+### 6.7 CSV 导出
+每次任务结束（含 partial / failed 部分成功）后自动导出：
+
+- **URL 文件**：`output/<task_name>_urls.csv`
+  字段：`task_name, group_name, url, host, ip, port, title, domain, icp_licence, icp_unit, icp_nature, icp_expired, province_cn, city_cn, country_cn, isp, asname, scene_cn, gps_lat, gps_lng`
+- **Subdomain 文件**：`output/<task_name>_subdomains.csv`
+  字段：`task_name, group_name, subdomain, domain, host, icp_licence, icp_unit, icp_nature, icp_expired, province_cn, city_cn, country_cn, isp, asname, scene_cn, gps_lat, gps_lng`
+
+CSV 需 UTF-8 with BOM。
+
+### 6.8 定时调度
+- 每月**最后 N 小时**（默认 6 小时，可由 `schedule.monthly_window_hours` 配置）内，对所有启用分组执行一次自动任务。
+- 需正确处理跨月、闰月、时区（按 `schedule.timezone`）。
+- 同一自然月内自动任务**不重复执行**（记录本月已执行标记）。
+- 提供"立即执行"按钮，方便测试；立即执行与定时执行走同一执行引擎，仅 `trigger_type` 不同。
+
+### 6.8.1 计划任务展示（只读，不允许设置）
+- 在 Web 界面提供「计划任务」页面（只读），展示以下信息：
+  - 调度开关状态（`schedule.enabled`）
+  - 每月执行窗口：最后 `monthly_window_hours` 小时
+  - 时区（`schedule.timezone`）
+  - 下一次预计执行时间（按当前时间计算出的窗口起点）
+  - 本月是否已自动执行（及对应任务 ID / 时间）
+  - 最近一次自动任务：时间、状态、耗时、消耗点数
+  - 历史自动任务列表（按时间倒序，仅展示 `trigger_type=scheduled` 的任务）
+- 该页面**不提供任何编辑/保存入口**，所有参数仅来源于 `config.yaml` 与数据库只读查询。
+- 若 `schedule.enabled=false`，页面需明确提示"自动调度已关闭"。
+
+### 6.8.2 调度自测（供 AI 与用户验证，不影响真实调度）
+- 目的：自动调度无法在真实环境中等待到月末，需提供可注入虚拟时间的自测能力。
+- 后端提供只读自测接口 `POST /api/scheduler/selftest`，入参为若干组虚拟时间点，返回每组时间的判定结果：
+  - `input_time`：注入的虚拟时间
+  - `in_window`：是否落在"每月最后 N 小时"窗口内
+  - `should_run`：是否应触发自动任务（结合本月已执行标记）
+  - `reason`：判定说明（如"未进入窗口""本月已执行""窗口内且未执行"）
+- 自测用例必须至少覆盖：
+  1. 月中普通时间 → 不触发
+  2. 月末窗口起点前一秒 → 不触发
+  3. 月末窗口起点 → 触发
+  4. 月末最后一秒 → 触发
+  5. 同月窗口内第二次调用 → 不触发（本月已执行）
+  6. 跨月后窗口内首次调用 → 触发
+  7. 闰年 2 月（如 2028-02-29）窗口判断正确
+  8. 时区切换（如 `Asia/Shanghai` 与 `UTC`）下窗口判断正确
+- 该自测**只做判定，不真正发起 Quake 请求、不写任务记录**（或写入带 `selftest=true` 标记的临时记录，与真实任务隔离）。
+- Web「计划任务」页面提供「调度自测」按钮：调用上述接口，将 8 组用例的 `input_time / in_window / should_run / reason` 以表格形式展示，全部通过显示绿色"通过"，任一失败显示红色并标注失败用例。
+- 提供 Go 单元测试 `internal/scheduler/scheduler_test.go`，用表驱动方式覆盖上述 8 个用例，`go test ./internal/scheduler/` 必须全部通过。
+
+### 6.9 Web 界面（遵循《通用Web页面框架.md》）
+至少包含以下页面：
+1. **仪表盘**：本月已用点数估算、上次任务时间、任务状态概览。
+2. **API 管理**：列表、增删改、排序、启用禁用、测试。
+3. **分组与域名**：分组增删改；分组下域名列表与批量导入。
+4. **黑名单**：关键词/正则增删。
+5. **任务管理**：任务列表、状态、耗时、消耗点数；"立即执行"按钮（按分组）。
+6. **数据查看**：URL / Subdomain 列表，支持按分组、任务、域名、host、ICP 关键字检索；支持下载 CSV。
+   - **任务执行时间展示**：列表每行需展示所属任务的执行时间（取 `tasks.started_at`，展示为 `YYYY-MM-DD HH:mm:ss`，按 `schedule.timezone` 格式化）；同时展示 `task_name`、`group_name`，便于定位来源。
+   - **URL 列表去重**：以 `url` 为索引跨任务去重，保留 `created_at` 最新记录（详见 6.6 第 6 条展示层去重）。
+   - **Subdomain 列表去重**：以 `subdomain` 为索引跨任务去重，保留 `created_at` 最新记录（详见 6.6 第 6 条展示层去重）。
+   - 列表默认按 `created_at` 倒序；提供「显示全部任务」开关，关闭时按上述去重规则展示，打开时展示原始明细（便于排查），开关默认关闭（即默认去重）。
+   - 分页、筛选、总数统计均基于当前视图（去重后或全量）计算，避免"总数与实际行数不符"。
+7. **配置查看**：只读展示当前 `config.yaml`（敏感字段脱敏）。
+
+## 7. 验收标准
+1. `go build` 在 Windows / Linux / macOS 均可成功（无需 CGO）。
+2. 启动后访问 `http://127.0.0.1:8360` 可正常打开页面。
+3. 导入至少 2 个 API Token 与 1 个分组（含若干域名），点击"立即执行"：能完成分页拉取、黑名单过滤、URL/subdomain 去重、ICP 与地理位置抽取、CSV 导出。
+4. **不使用滚动查询**：抓包或日志可确认仅出现 `page` / `page_size` 参数，无 `scroll_id` / `cursor` 等滚动参数；代码中无 scroll 分支。
+5. 输入 `wap.js.10086.cn`（无 scheme）能在 subdomain 结果中得到 `wap.js.10086.cn`，domain 为 `10086.cn`，且**没有**把 IP 当作 subdomain。
+6. 黑名单 `ottcn.com` 生效：结果中不含包含该关键词的 URL / host / domain。
+7. 配置 `point_budget_per_task` 生效：达到上限任务标记 `partial` 并停止。
+8. 定时调度在测试模式下（可注入时间）能触发月末尾窗口执行逻辑。
+9. 所有输出 CSV 中文不乱码，字段顺序与本文档一致。
+10. 「计划任务」页面为只读展示：能正确显示窗口小时数、时区、下次预计执行时间、本月是否已执行、最近自动任务与历史自动任务列表；页面无任何编辑入口。
+11. 调度自测可用：点击「调度自测」后，8 组用例结果以表格展示且全部通过；`go test ./internal/scheduler/` 全部通过；自测过程不产生真实 Quake 请求，不与真实任务记录混淆。
+12. 配置模板自动释放：删除当前目录 `config.yaml` 后启动程序，能自动生成 `config.yaml` 并打印生成路径提示；再次启动不覆盖已有文件，仅提示加载路径；只读目录下启动能明确报错并以非 0 退出。
+13. 数据查看去重与执行时间：
+    - 同一 URL 在两次不同任务中均被采集，Web「数据查看 → URL」默认视图仅显示 1 行，且为 `created_at` 较新的那条，`task_name` 与执行时间对应该新记录。
+    - 同一 subdomain 在两次不同任务中均被采集，Web「数据查看 → Subdomain」默认视图仅显示 1 行，且为 `created_at` 较新的那条。
+    - 列表每行均显示任务执行时间（格式 `YYYY-MM-DD HH:mm:ss`）、`task_name`、`group_name`。
+    - 打开「显示全部任务」开关后，能看到同 URL / 同 subdomain 的多条历史记录，条数与数据库入库记录一致。
+    - CSV 导出仍包含该任务全部入库记录，不受展示层去重影响。
+
+## 8. 交付物
+- 完整可运行源码（含 `go.mod`）。
+- 示例 `config.yaml`。
+- `README.md`：构建、启动、配置、页面使用说明。
+- 若与参考文件冲突，以《通用Web页面框架.md》为准，并在 PR 说明中记录取舍。
+
+请按以上规格逐步实现，先给出目录结构、数据库迁移与配置加载骨架，再实现 Quake 客户端、执行引擎、处理器、导出，最后接入 Web 页面。

@@ -1,0 +1,7 @@
+/kongtan
+/kongtan.exe
+/data/*.db
+/data/*.db-*
+/data/input/apis.txt
+/data/input/domains/*.txt
+/output/*.csv

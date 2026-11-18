@@ -1,0 +1,42 @@
+server:
+  listen_ip: "127.0.0.1"       # 监听 IP
+  port: 8360                    # 监听端口
+  read_timeout_sec: 30
+  write_timeout_sec: 60
+  api_key: ""                   # 可选：非空则启用 Bearer 鉴权（访问 /api 需带该 key）
+  log_file: "./data/kongtan.log" # 结构化日志落盘路径（控制台仅输出关键生命周期信息）
+
+quake:
+  base_url: "https://quake.360.net/api/v3/search/quake_service"
+  page_size: 1000               # 单次请求条数，≤1000
+  start_page: 1                 # 起始页码
+  max_pages: 50                 # 单域名最大翻页数（防止失控）
+  request_interval_ms: 300      # 请求间隔，避免限流
+  timeout_sec: 60               # 单次 HTTP 超时
+  max_retries: 2                # 单请求重试次数
+  point_budget_per_task: 50000  # 单任务一次性消费点数上限（达到即停止）
+  use_scroll: false             # 固定 false，禁止滚动查询
+  apis:                         # 多 API，顺序使用；前一个不可用/额度耗尽则切下一个
+    - name: "primary"
+      token: "xxxxxxxx"
+      enabled: true
+    - name: "backup"
+      token: "yyyyyyyy"
+      enabled: true
+
+schedule:
+  monthly_window_hours: 6       # 每月最后 N 小时自动执行
+  timezone: "Asia/Shanghai"     # 时区
+  enabled: true
+
+storage:
+  db_path: "./data/kongtan.db"
+  output_dir: "./output"
+  input_dir: "./data/input"     # API 与域名的 txt 输入目录
+
+blacklist:
+  # 匹配 URL / host / domain 中包含任一关键词即过滤
+  keywords:
+    - "ottcn.com"
+  # 可选：按正则过滤
+  regexes: []

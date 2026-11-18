@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>空探平台 · Quake 资产探测</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="name">空探平台</div>
+      <div class="sub">Quake 资产探测与信息收集</div>
+    </div>
+    <ul class="nav-list" id="nav-list">
+      <li><a href="#dashboard" data-view="dashboard">仪表盘</a></li>
+      <li><a href="#apis" data-view="apis">API 管理</a></li>
+      <li><a href="#groups" data-view="groups">分组与域名</a></li>
+      <li><a href="#blacklist" data-view="blacklist">黑名单</a></li>
+      <li><a href="#tasks" data-view="tasks">任务管理</a></li>
+      <li><a href="#schedule" data-view="schedule">计划任务</a></li>
+      <li><a href="#data" data-view="data">数据查看</a></li>
+      <li><a href="#config" data-view="config">配置查看</a></li>
+    </ul>
+    <div class="status">
+      <span class="pulse" id="nav-pulse"></span>
+      <span id="nav-state">连接中…</span>
+    </div>
+  </nav>
+
+  <div class="main">
+    <div class="topbar">
+      <button class="icon nav-btn" data-navbtn aria-expanded="false" aria-label="打开导航">☰</button>
+      <h2 id="view-title">仪表盘</h2>
+      <span class="grow"></span>
+      <button class="icon" data-theme-toggle title="切换主题">◐</button>
+      <button data-refresh title="刷新">刷新</button>
+    </div>
+
+    <!-- 仪表盘 -->
+    <section class="view" data-view="dashboard">
+      <div class="filter-bar">
+        <button class="primary" data-act="refresh-credits">查看当前账号剩余点数</button>
+        <span class="note" id="credits-updated"></span>
+      </div>
+      <div class="stat-row" id="dash-stats"></div>
+      <section class="card">
+        <header><h3>最近任务</h3><span class="grow"></span>
+          <button class="ghost xs" data-go="tasks">查看全部</button></header>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr>
+              <th>ID</th><th>分组</th><th>触发</th><th>状态</th><th>开始时间</th><th>记录数</th><th>点数</th>
+            </tr></thead>
+            <tbody id="dash-tasks"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- API 管理 -->
+    <section class="view" data-view="apis" hidden>
+      <section class="card">
+        <header><h3>Quake API Token</h3><span class="grow"></span>
+          <button class="primary" data-act="add-api">新增 API</button></header>
+        <div class="note pad-note">Token 脱敏展示；编辑时留空 Token 表示保持不变。顺序即使用优先级（前一个不可用自动切下一个）。</div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr>
+              <th>顺序</th><th>名称</th><th>Token</th><th>启用</th><th>操作</th>
+            </tr></thead>
+            <tbody id="apis-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- 分组与域名 -->
+    <section class="view" data-view="groups" hidden>
+      <section class="card">
+        <header><h3>域名分组</h3><span class="grow"></span>
+          <button class="primary" data-act="add-group">新建分组</button></header>
+        <div class="filter-bar">
+          <select id="group-select" data-filter="group"></select>
+          <button class="ghost" data-act="edit-group">编辑分组</button>
+          <button class="danger ghost" data-act="delete-group">删除分组</button>
+          <span class="grow"></span>
+          <button class="primary" data-act="add-domain">添加域名</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr>
+              <th>ID</th><th>域名</th><th>启用</th><th>录入时间</th><th>操作</th>
+            </tr></thead>
+            <tbody id="domains-body"></tbody>
+          </table>
+        </div>
+        <div class="note pad-note" id="group-desc"></div>
+      </section>
+    </section>
+
+    <!-- 黑名单 -->
+    <section class="view" data-view="blacklist" hidden>
+      <section class="card">
+        <header><h3>黑名单规则</h3><span class="grow"></span>
+          <button class="primary" data-act="add-blacklist">新增规则</button></header>
+        <div class="note pad-note">匹配对象为完整 URL / host / domain，任一命中即丢弃该条记录（采集入库前与导出前双重过滤）。</div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>ID</th><th>类型</th><th>值</th><th>操作</th></tr></thead>
+            <tbody id="blacklist-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- 任务管理 -->
+    <section class="view" data-view="tasks" hidden>
+      <section class="card">
+        <header><h3>探测任务</h3><span class="grow"></span>
+          <span class="filter-bar inline">
+            <select id="run-group-select"></select>
+            <button class="primary" data-act="run-task">立即执行</button>
+          </span></header>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr>
+              <th>ID</th><th>分组</th><th>触发</th><th>状态</th><th>开始</th><th>结束</th><th>记录数</th><th>点数</th><th>错误</th>
+            </tr></thead>
+            <tbody id="tasks-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- 计划任务（只读） -->
+    <section class="view" data-view="schedule" hidden>
+      <div id="schedule-notice"></div>
+      <section class="card">
+        <header><h3>计划任务（只读）</h3></header>
+        <div class="note pad-note">调度参数仅来源于 config.yaml，本页不提供任何修改入口。</div>
+        <div class="kv-grid" id="schedule-info"></div>
+      </section>
+      <section class="card">
+        <header><h3>历史自动任务（trigger_type=scheduled）</h3></header>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr>
+              <th>ID</th><th>分组</th><th>状态</th><th>开始时间</th><th>耗时</th><th>点数</th>
+            </tr></thead>
+            <tbody id="schedule-history"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- 数据查看 -->
+    <section class="view" data-view="data" hidden>
+      <section class="card">
+        <header><h3>采集数据</h3><span class="grow"></span></header>
+        <div class="tabs">
+          <button class="tab on" data-dtab="urls">URL</button>
+          <button class="tab" data-dtab="subdomains">子域名</button>
+        </div>
+        <div class="filter-bar">
+          <input type="search" placeholder="关键词搜索" data-filter="q">
+          <input type="search" placeholder="分组" data-filter="group">
+          <input type="search" placeholder="域名" data-filter="domain">
+          <input type="search" placeholder="host" data-filter="host">
+          <input type="search" placeholder="ICP 关键字" data-filter="icp">
+          <button class="ghost" data-act="reset-data">重置</button>
+          <span class="grow"></span>
+          <span class="note" id="data-count"></span>
+          <button class="ghost" data-act="download-data">下载 CSV</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead id="data-head"></thead>
+            <tbody id="data-body"></tbody>
+          </table>
+        </div>
+        <div class="filter-bar">
+          <button class="ghost" id="data-prev" data-act="data-prev">上一页</button>
+          <span class="note" id="data-page-info">第 1 页</span>
+          <button class="ghost" id="data-next" data-act="data-next">下一页</button>
+        </div>
+        <div class="note pad-note">下载 CSV 需先在下方选择任务（按任务导出）。</div>
+        <div class="filter-bar">
+          <select id="data-task-select"></select>
+          <button class="ghost" data-act="download-task">按所选任务下载 CSV</button>
+        </div>
+      </section>
+    </section>
+
+    <!-- 配置查看 -->
+    <section class="view" data-view="config" hidden>
+      <section class="card">
+        <header><h3>当前配置（敏感字段已脱敏）</h3></header>
+        <pre class="cfg-view" id="config-view">加载中…</pre>
+      </section>
+    </section>
+  </div>
+</div>
+
+<div class="veil" id="modal-root" hidden></div>
+<div id="toasts"></div>
+<script src="/assets/app.js"></script>
+</body>
+</html>
